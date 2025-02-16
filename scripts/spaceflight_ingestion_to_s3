@@ -1,8 +1,8 @@
 import json
 import boto3
 import requests
-import time
 import logging
+import time
 from datetime import datetime
 
 # Configuración
@@ -11,86 +11,88 @@ FOLDER_NAME = "raw"
 API_BASE_URL = "https://api.spaceflightnewsapi.net/v4"
 PAGE_SIZE = 100
 TIMEOUT = 10
-MAX_RETRIES = 5
+RATE_LIMIT_DELAY = 1  # Espera 1 segundo entre cada solicitud para evitar ser bloqueado.
 
 # Inicializar clientes de AWS
 s3 = boto3.client('s3')
 eventbridge = boto3.client('events')
 
-# Configuración de logs detallados
-logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+# Configuración de logs
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def fetch_paginated_data(endpoint):
-    """Obtiene datos paginados desde la API con manejo de rate limits."""
+    """Obtiene datos paginados desde la API con manejo de paginación y rate limits."""
     start = 0
     page_count = 0
-    retries = 0
-    backoff = 1  # Tiempo de espera inicial en segundos
+    all_data = []
 
     while True:
         url = f"{API_BASE_URL}/{endpoint}?_limit={PAGE_SIZE}&_start={start}"
         try:
+            logging.info(f"Solicitando datos de {url}")
             response = requests.get(url, timeout=TIMEOUT)
             response.raise_for_status()
             page_data = response.json()
 
-            if not page_data:
-                logger.info(f"No hay más datos en {endpoint}. Páginas procesadas: {page_count}")
+            # Validación de la respuesta
+            if not isinstance(page_data, dict) or 'results' not in page_data:
+                logging.warning(f"Formato de respuesta inesperado en {url}")
                 break
 
-            # Guardar en S3 con deduplicación
-            save_to_s3(page_data, f"{endpoint}_page_{start}")
+            results = page_data['results']
+            if not results:
+                logging.info(f"No hay más datos en {endpoint}. Páginas procesadas: {page_count}")
+                break
+
+            # Deduplicación de datos (por ejemplo, basado en 'id')
+            unique_results = deduplicate_data(results)
+            
+            # Guardar resultados en S3
+            save_to_s3(unique_results, f"{endpoint}_page_{start}")
+
+            all_data.extend(unique_results)
             page_count += 1
             start += PAGE_SIZE
-            logger.info(f"Página {page_count} de {endpoint} procesada.")
-            retries = 0  # Reiniciar contador de reintentos
-            time.sleep(0.5)  # Pausa corta para evitar saturar la API
+            logging.info(f"Página {page_count} de {endpoint} procesada con éxito.")
+
+            # Simulación de manejo de rate limits
+            time.sleep(RATE_LIMIT_DELAY)
+
+            # Limitar a 5 páginas para pruebas
+            if page_count >= 5:
+                logging.info("Se ha alcanzado el límite de 5 páginas para pruebas.")
+                break
 
         except requests.exceptions.RequestException as e:
-            logger.error(f"Error al obtener datos de {url}: {str(e)}")
+            logging.error(f"Error al obtener datos de {url}: {str(e)}")
+            break
+    
+    return all_data
 
-            if response.status_code == 429:  # Manejar rate limits
-                backoff = min(backoff * 2, 60)
-                logger.warning(f"Rate limit alcanzado. Esperando {backoff} segundos...")
-                time.sleep(backoff)
-            else:
-                retries += 1
-                if retries >= MAX_RETRIES:
-                    logger.error(f"Máximo de reintentos alcanzado en {endpoint}. Abortando.")
-                    break
+def deduplicate_data(data):
+    """Deduplica los datos basándose en el campo 'id'."""
+    seen_ids = set()
+    deduplicated_data = []
+
+    for item in data:
+        item_id = item.get('id')
+        if item_id not in seen_ids:
+            seen_ids.add(item_id)
+            deduplicated_data.append(item)
+        else:
+            logging.warning(f"Artículo duplicado encontrado: id={item_id}")
+
+    return deduplicated_data
 
 def save_to_s3(data, key):
-    """Guarda los datos en S3 como archivo JSON con deduplicación."""
+    """Guarda los datos en S3 como archivo JSON."""
     try:
-        existing_ids = set()
-        deduplicated_data = []
-
-        # Verificar si el archivo ya existe en S3
-        try:
-            response = s3.get_object(Bucket=BUCKET_NAME, Key=f"{FOLDER_NAME}/{key}.json")
-            existing_data = json.loads(response['Body'].read().decode('utf-8'))
-            existing_ids = {item['id'] for item in existing_data}
-            logger.info(f"Se encontraron {len(existing_ids)} registros existentes en {key}.json")
-        except s3.exceptions.NoSuchKey:
-            logger.info(f"No se encontró {key}.json. Creando un archivo nuevo...")
-
-        # Deduplicar datos
-        for item in data:
-            if item['id'] not in existing_ids:
-                deduplicated_data.append(item)
-                existing_ids.add(item['id'])
-
-        if deduplicated_data:
-            timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
-            key_with_timestamp = f"{FOLDER_NAME}/{key}_{timestamp}.json"
-            s3.put_object(Bucket=BUCKET_NAME, Key=key_with_timestamp, Body=json.dumps(deduplicated_data))
-            logger.info(f"Datos guardados en S3: {key_with_timestamp}")
-        else:
-            logger.info(f"No se encontraron datos nuevos para guardar en {key}.json")
-
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        key = f"{FOLDER_NAME}/{key}_{timestamp}.json"
+        s3.put_object(Bucket=BUCKET_NAME, Key=key, Body=json.dumps(data))
+        logging.info(f"Datos guardados en S3: {key}")
     except Exception as e:
-        logger.error(f"Error guardando datos en S3: {str(e)}")
+        logging.error(f"Error guardando datos en S3: {str(e)}")
 
 def send_event_to_eventbridge():
     """Envía un evento a EventBridge indicando que la ingesta ha finalizado."""
@@ -109,23 +111,20 @@ def send_event_to_eventbridge():
                 }
             ]
         )
-        logger.info(f"Evento enviado a EventBridge: {response}")
+        logging.info(f"Evento enviado a EventBridge: {response}")
     except Exception as e:
-        logger.error(f"Error al enviar evento a EventBridge: {str(e)}")
+        logging.error(f"Error al enviar evento a EventBridge: {str(e)}")
 
 def lambda_handler(event, context):
     """Manejador de AWS Lambda."""
-    logger.info("Inicio del proceso de ingesta.")
     endpoints = ["articles", "blogs", "reports"]
 
-    try:
-        for endpoint in endpoints:
-            logger.info(f"Procesando datos de {endpoint}...")
-            fetch_paginated_data(endpoint)
-        send_event_to_eventbridge()
-        logger.info("Proceso de ingesta completado con éxito.")
-    except Exception as e:
-        logger.error(f"Error crítico en el proceso de ingesta: {str(e)}", exc_info=True)
+    for endpoint in endpoints:
+        logging.info(f"Procesando datos de {endpoint}...")
+        fetch_paginated_data(endpoint)
+
+    # Enviar evento a EventBridge
+    send_event_to_eventbridge()
 
     return {
         "statusCode": 200,
