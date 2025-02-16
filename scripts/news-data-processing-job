@@ -1,1 +1,101 @@
+import sys
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import col, lower, explode, split, count, date_format, lit, monotonically_increasing_id
+import pyspark.sql.functions as F
+import logging
+
+# Configuración del logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Crear la sesión de Spark
+spark = SparkSession.builder \
+    .appName("NewsDataProcessing") \
+    .getOrCreate()
+
+logger.info("Iniciando el procesamiento de datos...")
+
+# Rutas de entrada y salida
+input_path = "s3://spaceflight-data-pipeline/raw"
+output_path = "s3://spaceflight-data-pipeline/processed"
+
+try:
+    # Leer datos desde S3
+    logger.info(f"Leyendo datos desde {input_path}")
+    data_df = spark.read.json(f"{input_path}/*.json")
+    
+    # Validar si el DataFrame no está vacío
+    if data_df.rdd.isEmpty():
+        logger.warning("El DataFrame está vacío. Verifique los datos de entrada.")
+        sys.exit(0)
+
+    # Extraer la clave 'results' para aplanar el DataFrame
+    logger.info("Extrayendo y aplanando la clave 'results' del JSON")
+    results_df = data_df.selectExpr("explode(results) as result").select("result.*")
+
+    # Limpieza y selección de columnas relevantes
+    logger.info("Limpiando y seleccionando columnas relevantes")
+    cleaned_df = results_df.select(
+        "id", 
+        "title", 
+        "summary", 
+        date_format(col("published_at"), "yyyy-MM-dd").alias("published_date"),
+        lower(col("news_site")).alias("name"),
+        "url"
+    )
+
+    ### ------------------ Análisis de contenido y tendencias ------------------ ###
+    # Análisis de contenido: Extracción de palabras clave
+    logger.info("Realizando análisis de contenido y extrayendo palabras clave")
+    keywords_df = cleaned_df.withColumn("keywords", explode(split(col("summary"), "\\s+"))) \
+        .groupBy("keywords") \
+        .agg(count("keywords").alias("count")) \
+        .orderBy(F.desc("count"))
+
+    # Análisis de tendencias: Conteo de artículos por fecha
+    logger.info("Realizando análisis de tendencias por fecha de publicación")
+    trends_df = cleaned_df.groupBy("published_date") \
+        .agg(count("id").alias("article_count")) \
+        .orderBy("published_date")
+
+    # Guardar resultados en S3 en formato Parquet
+    logger.info("Guardando resultados en formato Parquet")
+    keywords_df.write.mode("overwrite").parquet(f"{output_path}/keywords/")
+    trends_df.write.mode("overwrite").parquet(f"{output_path}/trends/")
+
+    ### ------------------ Construcción de tablas dim y fact ------------------ ###
+    # Tabla 1: dim_news_source
+    logger.info("Construyendo la tabla 'dim_news_source'")
+    dim_news_source_df = cleaned_df.select("name").distinct() \
+        .withColumn("source_id", monotonically_increasing_id()) \
+        .withColumn("reliability_score", lit(0.8))
+
+    dim_news_source_df.write.mode("overwrite").parquet(f"{output_path}/dim_news_source/")
+
+    # Tabla 2: dim_topic
+    logger.info("Construyendo la tabla 'dim_topic'")
+    dim_topic_df = keywords_df.select(
+        col("keywords").alias("name")
+    ).distinct().withColumn("topic_id", monotonically_increasing_id()) \
+    .withColumn("category", lit("general"))
+
+    dim_topic_df.write.mode("overwrite").parquet(f"{output_path}/dim_topic/")
+
+    # Tabla 3: fact_article
+    logger.info("Construyendo la tabla 'fact_article'")
+    fact_article_df = cleaned_df.join(dim_news_source_df, "name", "left") \
+        .withColumn("article_id", monotonically_increasing_id()) \
+        .withColumn("topic_id", lit(None).cast("int"))  # Placeholder para topic_id
+
+    fact_article_df.write.partitionBy("published_date").mode("overwrite").parquet(f"{output_path}/fact_article/")
+
+    logger.info("Procesamiento completado. Datos guardados en S3.")
+
+except Exception as e:
+    logger.error(f"Error durante el procesamiento: {str(e)}", exc_info=True)
+    sys.exit(1)
+
+finally:
+    spark.stop()
+    logger.info("Sesión de Spark finalizada.")
 
