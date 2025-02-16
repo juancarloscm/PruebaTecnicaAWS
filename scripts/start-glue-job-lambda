@@ -1,1 +1,31 @@
+import boto3
+import json
+import os
+
+# Cliente de AWS Glue
+glue_client = boto3.client('glue')
+
+def lambda_handler(event, context):
+    """
+    Esta función Lambda se ejecuta cuando EventBridge detecta un evento de finalización exitosa.
+    Inicia el AWS Glue Job para procesar los datos.
+    """
+    try:
+        response = glue_client.start_job_run(
+            JobName='news-data-processing-job'  # Nombre de tu Glue Job
+        )
+        
+        print(f"Glue Job iniciado con éxito. JobRunId: {response['JobRunId']}")
+        
+        return {
+            "statusCode": 200,
+            "body": json.dumps(f"Glue Job iniciado con JobRunId: {response['JobRunId']}")
+        }
+    
+    except Exception as e:
+        print(f"Error al iniciar el Glue Job: {str(e)}")
+        return {
+            "statusCode": 500,
+            "body": json.dumps(f"Error al iniciar el Glue Job: {str(e)}")
+        }
 
