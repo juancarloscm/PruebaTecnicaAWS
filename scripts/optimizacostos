@@ -1,1 +1,37 @@
+import boto3
+from datetime import datetime, timedelta
+
+# Inicializar el cliente de CloudWatch Logs
+logs_client = boto3.client('logs')
+
+LOG_GROUP_NAME = '/aws/lambda/spaceflight_ingestion_to_s3'
+RETENTION_DAYS = 30
+
+def lambda_handler(event, context):
+    try:
+        # Calcular la fecha límite para borrar logs
+        retention_time_in_ms = int((datetime.now() - timedelta(days=RETENTION_DAYS)).timestamp() * 1000)
+        
+        # Listar todas las streams en el grupo de logs
+        response = logs_client.describe_log_streams(
+            logGroupName=LOG_GROUP_NAME,
+            orderBy='LastEventTime',
+            descending=True
+        )
+
+        for log_stream in response['logStreams']:
+            last_event_timestamp = log_stream.get('lastEventTimestamp', 0)
+            if last_event_timestamp < retention_time_in_ms:
+                # Eliminar el log stream si está fuera del período de retención
+                logs_client.delete_log_stream(
+                    logGroupName=LOG_GROUP_NAME,
+                    logStreamName=log_stream['logStreamName']
+                )
+                print(f"Eliminado log stream: {log_stream['logStreamName']}")
+
+        return {"statusCode": 200, "body": "Logs eliminados correctamente."}
+
+    except Exception as e:
+        print(f"Error eliminando logs: {str(e)}")
+        return {"statusCode": 500, "body": "Error eliminando logs"}
 
