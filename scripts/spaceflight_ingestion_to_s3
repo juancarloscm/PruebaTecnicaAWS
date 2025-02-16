@@ -1,10 +1,9 @@
 import json
 import boto3
 import requests
-import concurrent.futures
-import logging
 from datetime import datetime
-from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from tenacity import retry, stop_after_attempt, wait_fixed
+import logging
 
 # Configuración
 BUCKET_NAME = "spaceflight-data-pipeline"
@@ -12,51 +11,55 @@ FOLDER_NAME = "raw"
 API_BASE_URL = "https://api.spaceflightnewsapi.net/v4"
 PAGE_SIZE = 100
 TIMEOUT = 10
-MAX_RETRIES = 5  # Máximo de reintentos por solicitud fallida
 
 # Inicializar clientes de AWS
 s3 = boto3.client('s3')
 eventbridge = boto3.client('events')
 
-# Configuración de logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+# Configuración de logs
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger()
 
-@retry(
-    stop=stop_after_attempt(MAX_RETRIES),
-    wait=wait_exponential(multiplier=1, min=2, max=10),
-    retry=retry_if_exception_type(requests.exceptions.RequestException)
-)
-def fetch_page(endpoint, start):
-    """Obtiene una página específica desde la API con manejo de reintentos."""
-    url = f"{API_BASE_URL}/{endpoint}?_limit={PAGE_SIZE}&_start={start}"
-    response = requests.get(url, timeout=TIMEOUT)
-    response.raise_for_status()
-    logger.info(f"Página {start // PAGE_SIZE + 1} de {endpoint} descargada.")
-    return response.json()
-
+# Reintento automático con Tenacity (hasta 2 intentos con 5 segundos de espera)
+@retry(stop=stop_after_attempt(2), wait=wait_fixed(5))
 def fetch_paginated_data(endpoint):
-    """Obtiene datos paginados desde la API y los guarda en S3."""
+    """Obtiene datos paginados desde la API."""
     start = 0
     page_count = 0
     
     while True:
+        url = f"{API_BASE_URL}/{endpoint}?_limit={PAGE_SIZE}&_start={start}"
         try:
-            page_data = fetch_page(endpoint, start)
-            if not page_data:
+            response = requests.get(url, timeout=TIMEOUT)
+            response.raise_for_status()
+            page_data = response.json()
+
+            # Verificar si 'results' está presente y no está vacío
+            if "results" not in page_data or not page_data["results"]:
                 logger.info(f"No hay más datos en {endpoint}. Páginas procesadas: {page_count}")
                 break
-
-            save_to_s3(page_data, f"{endpoint}_page_{start}")
+            
+            # Guardar solo la parte de "results" en S3
+            save_to_s3(page_data["results"], f"{endpoint}_page_{start}")
             page_count += 1
             start += PAGE_SIZE
 
-        except Exception as e:
-            logger.error(f"Error procesando {endpoint} en el inicio {start}: {str(e)}")
+            logger.info(f"Página {page_count} de {endpoint} procesada.")
+            
+            # Limitar a 5 páginas para pruebas
+            if page_count >= 5:
+                logger.info("Se ha alcanzado el límite de 5 páginas.")
+                break
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Error al obtener datos de {url}: {str(e)}")
+            break
+        except (TypeError, KeyError) as e:
+            logger.error(f"Error procesando datos de {endpoint} en la página {start}: {str(e)}")
             break
 
 def save_to_s3(data, key):
-    """Guarda los datos en S3 como archivo JSON y registra logs."""
+    """Guarda los datos en S3 como archivo JSON."""
     try:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
         key = f"{FOLDER_NAME}/{key}_{timestamp}.json"
@@ -87,26 +90,18 @@ def send_event_to_eventbridge():
         logger.error(f"Error al enviar evento a EventBridge: {str(e)}")
 
 def lambda_handler(event, context):
-    """Manejador de AWS Lambda con paralelismo limitado a 4 hilos y manejo de reintentos."""
+    """Manejador de AWS Lambda."""
     endpoints = ["articles", "blogs", "reports"]
     
-    logger.info("Inicio de la ingesta de datos.")
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
-        futures = [executor.submit(fetch_paginated_data, endpoint) for endpoint in endpoints]
-        
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                logger.error(f"Error en la ejecución de hilo: {str(e)}")
+    for endpoint in endpoints:
+        logger.info(f"Procesando datos de {endpoint}...")
+        fetch_paginated_data(endpoint)
     
     # Enviar evento a EventBridge
     send_event_to_eventbridge()
-    
-    logger.info("Ingesta finalizada con éxito.")
     
     return {
         "statusCode": 200,
         "body": json.dumps("Ingestión completada y evento enviado a EventBridge.")
     }
+
