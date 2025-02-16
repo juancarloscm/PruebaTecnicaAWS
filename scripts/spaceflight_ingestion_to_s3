@@ -1,1 +1,99 @@
+import json
+import boto3
+import requests
+from datetime import datetime
+
+# Configuración
+BUCKET_NAME = "spaceflight-data-pipeline"
+FOLDER_NAME = "raw"
+API_BASE_URL = "https://api.spaceflightnewsapi.net/v4"
+PAGE_SIZE = 100
+TIMEOUT = 10
+
+# Inicializar clientes de AWS
+s3 = boto3.client('s3')
+eventbridge = boto3.client('events')  # Cliente de EventBridge
+
+def fetch_paginated_data(endpoint):
+    """Obtiene datos paginados desde la API."""
+    start = 0
+    data = []
+    page_count = 0
+    
+    while True:
+        url = f"{API_BASE_URL}/{endpoint}?_limit={PAGE_SIZE}&_start={start}"
+        try:
+            response = requests.get(url, timeout=TIMEOUT)
+            response.raise_for_status()
+            page_data = response.json()
+            
+            if not page_data:
+                print(f"No hay más datos en {endpoint}. Páginas procesadas: {page_count}")
+                break
+            
+            # Guardar en S3 después de cada página
+            save_to_s3(page_data, f"{endpoint}_page_{start}")
+            data.extend(page_data)
+            page_count += 1
+            start += PAGE_SIZE
+            
+            print(f"Página {page_count} de {endpoint} procesada.")
+            
+            # Limitar a 5 páginas para pruebas
+            if page_count >= 5:
+                print("Se ha alcanzado el límite de 5 páginas.")
+                break
+
+        except requests.exceptions.RequestException as e:
+            print(f"Error al obtener datos de {url}: {str(e)}")
+            break
+    
+    return data
+
+def save_to_s3(data, key):
+    """Guarda los datos en S3 como archivo JSON."""
+    try:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        key = f"{FOLDER_NAME}/{key}_{timestamp}.json"
+        s3.put_object(Bucket=BUCKET_NAME, Key=key, Body=json.dumps(data))
+        print(f"Datos guardados en S3: {key}")
+    except Exception as e:
+        print(f"Error guardando datos en S3: {str(e)}")
+
+def send_event_to_eventbridge():
+    """Envía un evento a EventBridge indicando que la ingesta ha finalizado."""
+    try:
+        response = eventbridge.put_events(
+            Entries=[
+                {
+                    'Source': 'spaceflight-data-ingestion',
+                    'DetailType': 'IngestionCompleted',
+                    'Detail': json.dumps({
+                        "message": "Ingesta completada con éxito",
+                        "bucket": BUCKET_NAME,
+                        "path": f"s3://{BUCKET_NAME}/{FOLDER_NAME}"
+                    }),
+                    'EventBusName': 'default'
+                }
+            ]
+        )
+        print(f"Evento enviado a EventBridge: {response}")
+    except Exception as e:
+        print(f"Error al enviar evento a EventBridge: {str(e)}")
+
+def lambda_handler(event, context):
+    """Manejador de AWS Lambda."""
+    endpoints = ["articles", "blogs", "reports"]
+    
+    for endpoint in endpoints:
+        print(f"Procesando datos de {endpoint}...")
+        fetch_paginated_data(endpoint)
+    
+    # Enviar evento a EventBridge
+    send_event_to_eventbridge()
+    
+    return {
+        "statusCode": 200,
+        "body": json.dumps("Ingestión completada y evento enviado a EventBridge.")
+    }
 
