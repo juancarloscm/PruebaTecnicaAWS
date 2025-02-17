@@ -137,12 +137,12 @@ Ejemplos de consultas SQL:
 ---
 
 ## **Siguientes Pasos**
-1. Generar un Airflow DAG para automatizar el pipeline completo.  
+1. Generar un Airflow DAG para automatizar el pipeline completo (Costos)  
 2. Mejorar la configuración del Glue Job para procesar datos históricos y agregar nuevas funcionalidades de análisis.  
 3. Extender la visualización en Looker Studio para incluir gráficos adicionales y alertas de tendencias.
 
 ---
 
-¡Gracias por leer! 😊
+
 
 
