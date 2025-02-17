@@ -1,1 +1,55 @@
+🔍 1. ¿Mejora al modelo con Machine Learning
+Dado que se cuenta con noticias sobre vuelos espaciales, podemos aplicar Machine Learning para:
+✅ Predecir qué noticias serán populares (número de interacciones, compartidos, menciones).
+✅ Clasificar noticias por relevancia (baja, media, alta).
+✅ Detectar relaciones entre temas (clustering de noticias similares).
+
+Opción 1: Usar Amazon SageMaker AutoML (Autopilot)
+🛠 Herramientas:
+
+Amazon SageMaker Autopilot (entrena modelos sin código).
+Glue y Athena para preprocesar los datos.
+S3 para almacenar datasets de entrenamiento.
+Lambda y Step Functions para la automatización.
+⚙️ 2. Flujo del Modelo AutoML
+1️⃣ Preprocesamiento de Datos (AWS Glue)
+
+Convertir summary a texto procesable (Tokenización, Stopwords).
+Normalizar fechas y métricas (published_date, news_site).
+Etiquetar datos históricos (populares vs. no populares).
+2️⃣ Almacenamiento de Datos (S3 + Athena)
+
+Guardar los datos procesados en S3 (/training-data/).
+Crear una vista en Athena para analizar.
+3️⃣ Entrenamiento con SageMaker Autopilot
+
+Definir objetivo (popularity_score).
+Ejecutar AutoML con SageMaker.
+Evaluar modelos con XGBoost, Random Forest, Deep Learning.
+4️⃣ Despliegue del Modelo como Endpoint
+
+Guardar el mejor modelo en S3.
+Desplegarlo como un endpoint en SageMaker.
+Llamarlo desde Lambda para hacer predicciones en tiempo real.
+5️⃣ Automatización con Step Functions
+
+Trigger de AutoML cuando llegan nuevos datos.
+Reentrenar el modelo si los datos cambian.
+
+
+🤖 1.4. Amazon SageMaker AutoML
+Los costos estimados para desplegar la solucion depende de la instancia y
+horas de entrenamiento.
+
+Escenario1 
+
+Entrenamiento en ml.m5.2xlarge (8 vCPU, 32GB RAM)
+$0.77 USD/hora en región us-east-1
+Si el entrenamiento tarda 3 horas → $2.31 USD
+Desplegar el modelo en una instancia ml.m5.large → $0.10 USD/hora
+Uso 24/7 → $72 USD/mes (opcional, si necesitas predicciones en tiempo real)
+
+🛠 1.5. Amazon API Gateway + Lambda (Predicciones en Tiempo Real - Opcional)
+AWS Lambda: 1 millón de invocaciones gratis, luego $0.20 USD por millón adicional
+API Gateway: $3.50 USD por millón de solicitudes
 
