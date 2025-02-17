@@ -18,15 +18,12 @@ spark = SparkSession.builder \
 input_path = "s3://spaceflight-data-pipeline/raw"
 output_path = "s3://spaceflight-data-pipeline/processed"
 
-logger.info("Leyendo datos desde S3...")
+logger.info("📥 Leyendo datos desde S3...")
 # Leer datos desde S3
 data_df = spark.read.json(f"{input_path}/*.json")
 
-# Extraer la clave 'results' para aplanar el DataFrame
-results_df = data_df.selectExpr("explode(results) as result").select("result.*")
-
-# Limpieza y selección de columnas relevantes
-cleaned_df = results_df.select(
+# Extraer los datos directamente SIN `results`
+cleaned_df = data_df.select(
     "id", 
     "title", 
     "summary", 
@@ -35,7 +32,7 @@ cleaned_df = results_df.select(
     "url"
 )
 
-logger.info("Procesando datos para análisis de contenido y tendencias...")
+logger.info("🔎 Procesando datos para análisis de contenido y tendencias...")
 ### ------------------ Análisis de contenido y tendencias ------------------ ###
 
 # Análisis de contenido: Extracción de palabras clave
@@ -49,12 +46,12 @@ trends_df = cleaned_df.groupBy("published_date") \
     .agg(count("id").alias("article_count")) \
     .orderBy("published_date")
 
-logger.info("Guardando resultados en S3 (Parquet)...")
+logger.info("💾 Guardando análisis en S3 (Parquet)...")
 # Guardar resultados en S3 en formato Parquet
 keywords_df.write.mode("overwrite").parquet(f"{output_path}/keywords/")
 trends_df.write.mode("overwrite").parquet(f"{output_path}/trends/")
 
-logger.info("Construyendo tablas dim y fact...")
+logger.info("🛠 Construyendo tablas dim y fact...")
 ### ------------------ Construcción de tablas dim y fact ------------------ ###
 
 # Tabla 1: dim_news_source
@@ -72,12 +69,29 @@ dim_topic_df = keywords_df.select(
 
 dim_topic_df.write.mode("overwrite").parquet(f"{output_path}/dim_topic/")
 
-# Tabla 3: fact_article
-fact_article_df = cleaned_df.join(dim_news_source_df, "name", "left") \
-    .withColumn("article_id", row_number().over(Window.orderBy("published_date"))) \
-    .withColumn("topic_id", lit(None).cast("int"))  # Placeholder para topic_id
+# Tabla 3: fact_article (con asignación correcta de topic_id)
+fact_article_df = cleaned_df.alias("articles") \
+    .join(keywords_df.alias("keywords"), 
+          F.expr("articles.summary LIKE CONCAT('%', keywords.keywords, '%')"), 
+          "left") \
+    .join(dim_topic_df.alias("topics"), 
+          F.col("keywords.keywords") == F.col("topics.name"), 
+          "left") \
+    .join(dim_news_source_df.alias("sources"), 
+          "name", 
+          "left") \
+    .select(
+        F.row_number().over(Window.orderBy("published_date")).alias("article_id"),
+        F.col("sources.source_id"),
+        F.col("topics.topic_id"),  
+        F.col("published_date"),
+        F.col("title"),
+        F.col("summary"),
+        F.col("url")
+    )
 
+logger.info("📤 Guardando fact_article en S3 particionado por published_date...")
 fact_article_df.write.partitionBy("published_date").mode("overwrite").parquet(f"{output_path}/fact_article/")
 
-logger.info("Procesamiento completado. Datos guardados en S3.")
+logger.info("✅ Procesamiento completado. Datos guardados en S3.")
 spark.stop()
