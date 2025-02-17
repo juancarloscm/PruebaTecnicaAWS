@@ -1,1 +1,13 @@
+SELECT 
+    f.article_id, 
+    f.published_date, 
+    f.source_id, 
+    t.name AS topic, 
+    LENGTH(f.summary) AS summary_length,
+    CASE 
+        WHEN (RAND() > 0.7) THEN 1 ELSE 0 
+    END AS popularity_score  -- Simulación de popularidad
+FROM fact_article f
+JOIN dim_topic t ON f.topic_id = t.topic_id;
+
 
